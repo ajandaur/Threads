@@ -12,7 +12,10 @@ import SwiftData
 struct ThreadsApp: App {
     var sharedModelContainer: ModelContainer = {
         let schema = Schema([
-            Item.self,
+            Workstream.self,
+            Message.self,
+            ContextNode.self,
+            ProactiveSurfacing.self,
         ])
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
 

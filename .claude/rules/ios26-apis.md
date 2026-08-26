@@ -470,11 +470,13 @@ class NLContextualEmbeddingResult: NSObject {
     var string: String { get }
     var language: NLLanguage { get }
     var sequenceLength: Int { get }   // number of subword-token vectors produced
-    // both are NS_REFINED_FOR_SWIFT in the header — the exact overlay
-    // signature isn't visible from the header alone; verify against current
-    // Apple documentation before relying on parameter order/types:
-    //   enumerateTokenVectorsInRange:usingBlock:  (NSRange, block)
-    //   tokenVectorAtIndex:tokenRange:            (NSUInteger, NSRangePointer)
+
+    // Verified against Apple documentation (developer.apple.com/documentation/
+    // naturallanguage/nlcontextualembeddingresult), not the header alone —
+    // these are the real Swift overlay signatures for the two
+    // NS_REFINED_FOR_SWIFT members:
+    @nonobjc func enumerateTokenVectors(in range: Range<String.Index>, using block: ([Double], Range<String.Index>) -> Bool)
+    @nonobjc func tokenVector(at index: String.Index) -> ([Double], Range<String.Index>)?
 }
 ```
 Supported languages/scripts as of iOS 17/18 SDKs (per header doc comments):
