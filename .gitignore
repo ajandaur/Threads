@@ -1,0 +1,7 @@
+# Xcode per-user state — window layout, breakpoints, scheme ordering, debugger
+# state. Regenerated on every build and differs per machine, so it only ever
+# shows up as noise in a diff.
+xcuserdata/
+
+# macOS
+.DS_Store
