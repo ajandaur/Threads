@@ -5,3 +5,11 @@ xcuserdata/
 
 # macOS
 .DS_Store
+
+# Local API credentials. `APIKeyStore` in LLMProvider.swift reads the key from
+# the ANTHROPIC_API_KEY environment variable, an Info.plist entry fed by an
+# .xcconfig, or a bundled Secrets.plist — the latter two live only on the
+# machine that built them.
+Secrets.plist
+*.xcconfig
+.env
