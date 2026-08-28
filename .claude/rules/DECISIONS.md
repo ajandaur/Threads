@@ -13,6 +13,7 @@ These are imperative preferences. Locked. They survive compaction and no later s
 | `@concurrent` for CPU work | Swift 6.2 Approachable Concurrency, explicit background opt-in |
 | SpeechAnalyzer over SFSpeechRecognizer | iOS 26 API, modular, offline-first, Swift Concurrency native |
 | Relevance decay (14-day half-life) | Prevents stale context from dominating retrieval |
+| `decayStrength` = 0.25 | Bounds decay's authority over ranking independent of the half-life's shape (see `ContextEngine.swift`) |
 | Retrieval strategy parameterized | Enables clean eval comparison against identical data |
 | Superseded-node links | Makes "topically near but wrong" a first-class retrieval case rather than an eval afterthought |
 | Extraction confidence scoring | Enables escalation to Claude for low-confidence extractions; also drives UI dimming |
