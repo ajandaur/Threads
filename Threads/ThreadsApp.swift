@@ -10,7 +10,10 @@ import SwiftData
 
 @main
 struct ThreadsApp: App {
-    var sharedModelContainer: ModelContainer = {
+    var sharedModelContainer: ModelContainer
+    var orchestrator: ThreadOrchestrator
+
+    init() {
         let schema = Schema([
             Workstream.self,
             Message.self,
@@ -19,16 +22,24 @@ struct ThreadsApp: App {
         ])
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
 
+        let container: ModelContainer
         do {
-            return try ModelContainer(for: schema, configurations: [modelConfiguration])
+            container = try ModelContainer(for: schema, configurations: [modelConfiguration])
         } catch {
             fatalError("Could not create ModelContainer: \(error)")
         }
-    }()
+        sharedModelContainer = container
+
+        do {
+            orchestrator = try ThreadOrchestrator.makeDefault(modelContainer: container)
+        } catch {
+            fatalError("Could not create ThreadOrchestrator: \(error)")
+        }
+    }
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            ThreadView(orchestrator: orchestrator)
         }
         .modelContainer(sharedModelContainer)
     }
