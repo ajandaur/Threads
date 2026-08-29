@@ -26,8 +26,12 @@
 //
 //  `LanguageModelSession` throws `GenerationError.concurrentRequests` when a
 //  second `respond` starts while the first is in flight. The sessions are the
-//  mutable state this type owns; actor isolation serializes access to them by
-//  construction, which is the whole reason there is no lock in this file.
+//  mutable state this type owns, and actor isolation keeps every synchronous
+//  access to them race-free — but `respond` itself `await`s mid-call, and
+//  Swift actors are reentrant across a suspension point, so two calls for the
+//  same task could otherwise interleave there. `generate` closes that gap
+//  with a small per-task mutex (`acquireLock`/`releaseLock`) rather than
+//  relying on isolation alone.
 //
 //  ## No SwiftData here
 //
@@ -457,6 +461,12 @@ actor OnDeviceIntelligence {
     /// past the context window — see `generate(_:for:prompt:)`.
     private var sessions: [Task: LanguageModelSession] = [:]
 
+    /// One mutex per task, guarding the whole `generate` critical section
+    /// (including the reset-and-retry path) against actor reentrancy. See
+    /// "Why an actor" above.
+    private var busyTasks: Set<Task> = []
+    private var lockWaiters: [Task: [CheckedContinuation<Void, Never>]] = [:]
+
     init(
         generalModel: SystemLanguageModel = .default,
         taggingModel: SystemLanguageModel = SystemLanguageModel(useCase: .contentTagging),
@@ -560,6 +570,31 @@ actor OnDeviceIntelligence {
         sessions[task] = nil
     }
 
+    // MARK: Per-task mutex
+    //
+    // `internal` rather than `private` so the mutex itself is directly
+    // testable without a model call — see `OnDeviceIntelligenceLockingTests`.
+
+    /// Suspends until no other call is holding `task`'s lock, then takes it.
+    func acquireLock(for task: Task) async {
+        if busyTasks.insert(task).inserted { return }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            lockWaiters[task, default: []].append(continuation)
+        }
+    }
+
+    /// Hands the lock straight to the next waiter, if any, so nothing else
+    /// can acquire it in between.
+    func releaseLock(for task: Task) {
+        guard var queue = lockWaiters[task], !queue.isEmpty else {
+            busyTasks.remove(task)
+            return
+        }
+        let next = queue.removeFirst()
+        lockWaiters[task] = queue.isEmpty ? nil : queue
+        next.resume()
+    }
+
     /// The single generation path.
     ///
     /// Sessions are held per task rather than made per call, so a transcript
@@ -583,6 +618,9 @@ actor OnDeviceIntelligence {
                 reason: OnDeviceFallbackProvider.describe(reason)
             )
         }
+
+        await acquireLock(for: task)
+        defer { releaseLock(for: task) }
 
         do {
             return try await respond(type, for: task, prompt: prompt, options: options)
@@ -644,8 +682,6 @@ actor OnDeviceIntelligence {
             return .guardrailViolation(task: task.rawValue)
         case .assetsUnavailable(let context):
             return .modelUnavailable(task: task.rawValue, reason: context.debugDescription)
-        case .exceededContextWindowSize:
-            return .promptTooLarge(task: task.rawValue)
         default:
             return .generationFailed(task: task.rawValue, debugDescription: String(describing: error))
         }
@@ -728,7 +764,10 @@ nonisolated enum IntelligencePrompts {
         if !exchange.existingContext.isEmpty {
             let existing = exchange.existingContext
                 .prefix(maximumExistingFragments)
-                .map { "- [\($0.nodeType)] \(clip($0.content, to: 200))" }
+                .map { fragment -> String in
+                    let marker = fragment.isSuperseded ? " (superseded)" : ""
+                    return "- [\(fragment.nodeType)\(marker)] \(clip(fragment.content, to: 200))"
+                }
                 .joined(separator: "\n")
             sections.append("Existing context:\n\(existing)")
         }
@@ -824,12 +863,22 @@ nonisolated enum IntelligencePrompts {
 
     // MARK: Formatting
 
-    /// Oldest first, matching the order `ContextEngine` builds history in.
+    /// `messages` arrives newest first — `ContextRetrievalEngine.assemblePayload`
+    /// fills the token budget by walking recent messages from most recent
+    /// backward, so that is the order its output is in. The most recent
+    /// `maximumDigestMessages` are kept, then replayed oldest first so the
+    /// model reads the exchange in the order it actually happened.
     static func transcript(of messages: [MessageSnapshot]) -> String {
         messages
-            .suffix(maximumDigestMessages)
+            .prefix(maximumDigestMessages)
+            .reversed()
             .map { snapshot in
-                let role = snapshot.role == MessageRole.user.rawValue ? "User" : "Assistant"
+                let role: String
+                switch MessageRole(rawValue: snapshot.role) {
+                case .user: role = "User"
+                case .system: role = "System"
+                case .assistant, .none: role = "Assistant"
+                }
                 return "\(role): \(clip(snapshot.content, to: 240))"
             }
             .joined(separator: "\n")

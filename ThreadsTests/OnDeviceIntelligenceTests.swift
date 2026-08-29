@@ -327,20 +327,22 @@ import Testing
             ContextFragment(content: "Who owns the cutover?", nodeType: ContextNodeType.openQuestion.rawValue),
             ContextFragment(content: "Draft the migration plan.", nodeType: ContextNodeType.actionItem.rawValue),
         ],
+        // Newest first, matching `ContextRetrievalEngine.assemblePayload`'s
+        // actual output order.
         recentMessages: [
-            MessageSnapshot(
-                messageID: UUID(),
-                role: MessageRole.user.rawValue,
-                content: "Where did we land?",
-                estimatedTokens: 5,
-                createdAt: Date(timeIntervalSince1970: 1)
-            ),
             MessageSnapshot(
                 messageID: UUID(),
                 role: MessageRole.assistant.rawValue,
                 content: "On Postgres.",
                 estimatedTokens: 4,
                 createdAt: Date(timeIntervalSince1970: 2)
+            ),
+            MessageSnapshot(
+                messageID: UUID(),
+                role: MessageRole.user.rawValue,
+                content: "Where did we land?",
+                estimatedTokens: 5,
+                createdAt: Date(timeIntervalSince1970: 1)
             ),
         ]
     )
@@ -398,7 +400,9 @@ import Testing
     }
 
     @Test func historyIsCappedToTheMostRecentMessagesNotTheOldest() {
-        let messages = (0 ..< 30).map { index in
+        // Newest first, matching `ContextRetrievalEngine.assemblePayload`'s
+        // actual output order: "Message number 29." is the most recent.
+        let messages = Array((0 ..< 30).map { index in
             MessageSnapshot(
                 messageID: UUID(),
                 role: MessageRole.user.rawValue,
@@ -406,12 +410,74 @@ import Testing
                 estimatedTokens: 4,
                 createdAt: Date(timeIntervalSince1970: TimeInterval(index))
             )
-        }
+        }.reversed())
         let transcript = IntelligencePrompts.transcript(of: messages)
 
         #expect(transcript.contains("Message number 29."))
         #expect(transcript.contains("Message number \(30 - IntelligencePrompts.maximumDigestMessages)."))
         #expect(transcript.contains("Message number \(30 - IntelligencePrompts.maximumDigestMessages - 1).") == false)
+    }
+
+    @Test func transcriptReplaysTheKeptMessagesOldestFirst() {
+        // Input newest first; output should read chronologically.
+        let messages = [
+            MessageSnapshot(
+                messageID: UUID(),
+                role: MessageRole.assistant.rawValue,
+                content: "Second.",
+                estimatedTokens: 4,
+                createdAt: Date(timeIntervalSince1970: 2)
+            ),
+            MessageSnapshot(
+                messageID: UUID(),
+                role: MessageRole.user.rawValue,
+                content: "First.",
+                estimatedTokens: 4,
+                createdAt: Date(timeIntervalSince1970: 1)
+            ),
+        ]
+        let transcript = IntelligencePrompts.transcript(of: messages)
+
+        let first = try? #require(transcript.range(of: "First."))
+        let second = try? #require(transcript.range(of: "Second."))
+        #expect(first != nil && second != nil)
+        if let first, let second {
+            #expect(first.lowerBound < second.lowerBound)
+        }
+    }
+
+    @Test func systemMessagesAreLabeledDistinctlyFromAssistantMessages() {
+        let messages = [
+            MessageSnapshot(
+                messageID: UUID(),
+                role: MessageRole.system.rawValue,
+                content: "Background note.",
+                estimatedTokens: 3,
+                createdAt: Date(timeIntervalSince1970: 1)
+            ),
+        ]
+        let transcript = IntelligencePrompts.transcript(of: messages)
+
+        #expect(transcript.contains("System: Background note."))
+        #expect(transcript.contains("Assistant: Background note.") == false)
+    }
+
+    @Test func extractionPromptLabelsSupersededExistingContext() {
+        let exchange = ConversationExchange(
+            workstreamTitle: "Ledger migration",
+            userMessage: "Should we move the ledger to Postgres?",
+            assistantMessage: "Given the write volume, yes.",
+            existingContext: [
+                ContextFragment(
+                    content: "The ledger stays on SQLite.",
+                    nodeType: ContextNodeType.decision.rawValue,
+                    isSuperseded: true
+                ),
+            ]
+        )
+        let prompt = IntelligencePrompts.extraction(for: exchange)
+
+        #expect(prompt.contains("(superseded)"))
     }
 
     @Test func taggingPromptCarriesTheTextVerbatim() {
@@ -439,6 +505,68 @@ import Testing
         #expect(essay.count > IntelligencePrompts.maximumFieldCharacters)
         #expect(prompt.count < essay.count)
         #expect(prompt.contains("…"))
+    }
+}
+
+// MARK: - Per-task mutex
+//
+// Exercises `acquireLock`/`releaseLock` directly rather than through
+// `extractContext` et al., since those need a model the simulator does not
+// have. This is the primitive `generate` relies on to stay correct under
+// actor reentrancy, so it is testable without one.
+
+@Suite struct OnDeviceIntelligenceLockingTests {
+
+    private actor Recorder {
+        private var current = 0
+        private(set) var maxConcurrent = 0
+
+        func enter() {
+            current += 1
+            maxConcurrent = max(maxConcurrent, current)
+        }
+
+        func exit() {
+            current -= 1
+        }
+    }
+
+    @Test func concurrentCallsForTheSameTaskNeverOverlap() async {
+        let intelligence = OnDeviceIntelligence()
+        let recorder = Recorder()
+
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0 ..< 8 {
+                group.addTask {
+                    await intelligence.acquireLock(for: .extraction)
+                    await recorder.enter()
+                    try? await Task.sleep(nanoseconds: 2_000_000)
+                    await recorder.exit()
+                    await intelligence.releaseLock(for: .extraction)
+                }
+            }
+        }
+
+        #expect(await recorder.maxConcurrent == 1)
+    }
+
+    @Test func locksForDifferentTasksAreIndependent() async {
+        let intelligence = OnDeviceIntelligence()
+        let recorder = Recorder()
+
+        await withTaskGroup(of: Void.self) { group in
+            for task in OnDeviceIntelligence.Task.allCases {
+                group.addTask {
+                    await intelligence.acquireLock(for: task)
+                    await recorder.enter()
+                    try? await Task.sleep(nanoseconds: 5_000_000)
+                    await recorder.exit()
+                    await intelligence.releaseLock(for: task)
+                }
+            }
+        }
+
+        #expect(await recorder.maxConcurrent == OnDeviceIntelligence.Task.allCases.count)
     }
 }
 
