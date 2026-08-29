@@ -14,6 +14,18 @@ The claim: **building a memory system is the easy part. Proving it retrieves the
 
 ---
 
+## Demo
+
+_A recording of the current build: type a message, watch it round-trip through retrieval, Foundation Models, and Claude, and land back in the thread._
+
+<!-- Drop the recording in here. On GitHub.com, drag the video file directly into
+     this README while editing it in the browser — GitHub uploads it and replaces
+     this comment with a link like:
+     https://github.com/<user>/<repo>/assets/<id>/<hash>
+     A local file works too: ![demo](./docs/demo.gif) -->
+
+---
+
 ## Status
 
 Portfolio project, built in daily increments against written contracts, each verified in a fresh review session.
@@ -22,15 +34,17 @@ Portfolio project, built in daily increments against written contracts, each ver
 - ✅ **SwiftData schema** — `Workstream`, `Message`, `ContextNode`, `ProactiveSurfacing`, with cascade-delete relationships and enums stored as raw `String` for `#Predicate` compatibility. 7 tests.
 - ✅ **`ContextEngine`** — `EmbeddingService` (actor over `NLContextualEmbedding`, 512-dim, mean-pooled, L2-normalized) and `ContextRetrievalEngine` (three strategies behind one config parameter, not three code paths). 7 tests.
 - ✅ **Retrieval eval** — 36 hand-labeled nodes, 30 hand-labeled queries, three strategies, comparison table regenerated on every run. 7 tests.
+- ✅ **`LLMProvider`** — Claude over SSE streaming, with on-device (Foundation Models) fallback and provider failover. 44 tests.
+- ✅ **`OnDeviceIntelligence`** — on-device extraction, summarization, and tagging via Foundation Models, actor-isolated with per-task locking. 40 tests.
+- ✅ **`ThreadOrchestrator`** — the full `send()` lifecycle: save → embed → retrieve → stream → persist, then background extraction, escalation, and summary. 22 tests.
+- ✅ **Minimal chat UI** — `ThreadOrchestrator` wired into the app; a scrolling thread view and a send box, enough to exercise the whole loop end to end on device. Unstyled by design — the real UI pass hasn't started (see [`rules/ui.md`](./.claude/rules/ui.md)).
 
 **Open**
 - 🚧 `decay-weighted semantic` collapses onto the recency baseline. A real finding, not a test defect — the fix belongs in `ContextEngine`'s scoring, not the eval.
 
 **Not started**
-- ⬜ Core message loop (send → retrieve → stream → extract → store)
 - ⬜ Voice capture (`SpeechAnalyzer`)
-- ⬜ UI — dark, voice-first, with a debug inspector for retrieval scores
-- ⬜ Claude API streaming provider + on-device fallback
+- ⬜ Real UI pass — dark, voice-first, node-type colors, debug inspector for retrieval scores
 
 Day-by-day plan in [`SPEC.md`](./SPEC.md).
 
@@ -118,7 +132,9 @@ The point isn't that an agent wrote the code. It's that the code is held to the 
 
 ## Known limitations
 
-`NLContextualEmbedding` cannot compile its model on the simulator (`NLNaturalLanguageErrorDomain Code=7 "E5 model compilation failed"`), so the four tests needing a real embedding fail there and pass on a physical iPhone 17 Pro. There's no simulator fallback — iOS 26.5 is the only runtime above the project's 26.4 deployment target. **Run the suite on a device.** These tests exercise the real framework rather than a mock, on purpose, and stay that way.
+`NLContextualEmbedding` cannot compile its model on the simulator (`NLNaturalLanguageErrorDomain Code=7 "E5 model compilation failed"`), so the four tests needing a real embedding fail there and pass on a physical iPhone 17 Pro. There's no simulator fallback — iOS 26.5 is the only runtime above the project's 26.4 deployment target. **Run the suite on a device.** These tests exercise the real framework rather than a mock, on purpose, and stay that way. `ThreadOrchestrator` degrades gracefully when this happens — a failed embed becomes an empty vector rather than a failed send — so the app still functions on the simulator with degraded retrieval.
+
+`ThreadOrchestrator` creates its `ModelContext` during `init()`, which currently runs on the main thread, but the actor's own methods then touch that context from a background executor — SwiftData logs `ModelContext: Unbinding from the main queue... consider using a ModelActor` at runtime. Observed live, not yet fixed; the correct shape is likely `ThreadOrchestrator` as a `ModelActor` rather than a plain `actor` holding a `ModelContext`.
 
 ---
 
