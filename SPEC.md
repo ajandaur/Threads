@@ -199,32 +199,30 @@ Update this section whenever a file lands, before anything else in this document
 
 - `ContextEngine.swift` — `EmbeddingService` (actor; NLContextualEmbedding wrapper with vDSP cosine similarity) and `ContextRetrievalEngine` (explicitly `nonisolated` struct; payload assembly, token budgeting, relevance decay, `decayStrength` bounding). Retrieval is parameterized by strategy and returns nodes with their scores.
 - `LLMProvider.swift` — `LLMStreamingProvider` protocol, `ClaudeSSEProvider` (SSE over `URLSession.AsyncBytes`, no SDK), `OnDeviceFallbackProvider` (Foundation Models), and `LLMProviderFactory`. Covers streaming SSE parsing, API key resolution precedence, request encoding, transparent failover, and refusal handling. Not yet wired into an orchestrator.
-- `OnDeviceIntelligence.swift` — Layer 2. Four `@Generable` result types (`ExtractedContext`, `WorkstreamSummary`, `ProactiveAnalysis`, `ContentTags`), one `LanguageModelSession` per task, held by an actor so the sessions cannot be entered concurrently. Tagging runs on `SystemLanguageModel(useCase: .contentTagging)`; the other three run on `.default`. Extraction returns calibrated confidence with an escalation flag rather than the model's raw self-report. Prompt building and calibration are pure `nonisolated` value types, which is what makes them testable without Apple Intelligence. Not yet wired into an orchestrator.
+- `OnDeviceIntelligence.swift` — Layer 2. Four `@Generable` result types (`ExtractedContext`, `WorkstreamSummary`, `ProactiveAnalysis`, `ContentTags`), one `LanguageModelSession` per task, held by an actor behind a per-task mutex so a reentrant call cannot enter the same session concurrently. Tagging runs on `SystemLanguageModel(useCase: .contentTagging)`; the other three run on `.default`. Extraction returns calibrated confidence with an escalation flag rather than the model's raw self-report. Prompt building and calibration are pure `nonisolated` value types, which is what makes them testable without Apple Intelligence.
+- `ThreadOrchestrator.swift` — Layer 4, the full message lifecycle through a single `send()` entry point. An actor with its own `ModelContext` (created from the shared `ModelContainer`, separate from the UI's context), so its work runs genuinely off the main thread rather than merely interleaving with it. `send()` streams steps 1-7 (save, embed, retrieve, assemble, stream via `LLMProviderFactory`, save) to the caller, then continues steps 8-12 (extract, escalate low-confidence items to Claude, mark superseded nodes, embed new nodes, summarize every tenth message) in a detached background `Task` the caller never awaits. Prompt/formatting logic (`OrchestrationPrompts`, `EscalationPromptBuilder`) is split into pure `nonisolated` enums, and the SwiftData-touching halves of extraction and escalation (`applyExtraction`, `escalate`) are exposed at `internal` access specifically so they are testable with hand-built `CalibratedExtraction` values and a stub `LLMStreamingProvider`, without depending on a working on-device model.
 
 **/ThreadsTests**
 
 - `RetrievalSet.json` — 36-node synthetic corpus, six supersession chains, 30 hand-authored labeled queries. Frozen and committed as a standalone commit for provenance. Human-authored; never agent-modified.
 - `RetrievalEval.swift` — three-strategy eval runner. Fixed evaluation clock, deterministic node IDs, no caching, macro-averaged precision@5 / recall@5, tier-2 assertions as inequalities rather than golden numbers. Runs on physical device only.
 - `LLMProviderTests.swift` — SSE parser state machine against canned event lines, request-body shape, key resolution, factory routing and failover, and the Claude provider over a stubbed `URLProtocol` transport.
-- `OnDeviceIntelligenceTests.swift` — confidence calibration, prompt construction and budgeting, and the generation-vocabulary-to-storage-vocabulary mapping. Calls no model: the simulator has no Apple Intelligence, so the assertions are on the logic around the model rather than on its prose.
+- `OnDeviceIntelligenceTests.swift` — confidence calibration, prompt construction and budgeting, the generation-vocabulary-to-storage-vocabulary mapping, and the per-task mutex under real actor reentrancy. Calls no model: the simulator has no Apple Intelligence, so the assertions are on the logic around the model rather than on its prose.
+- `ThreadOrchestratorTests.swift` — system-prompt/message assembly, the escalation round trip, and supersession (including a real superseding case and an already-superseded node that must not be retargeted) against a stub `LLMStreamingProvider` and an in-memory `ModelContainer`. Calls no model and no `NLContextualEmbedding`, both unavailable on the simulator; `send()`'s degrade-to-empty-query-vector path is exercised instead of the real embedding.
 - `ModelContainerHelper.swift` — per-test in-memory `ModelContainer`.
 
 ### Not yet built
 
-**/Core**
-
-- `ThreadOrchestrator.swift` — the full message lifecycle through a single `send()` entry point.
-
 **/App**
 
-- `ThreadsApp.swift` exists with real-schema `ModelContainer` configuration. API key wiring not yet built.
+- `ThreadsApp.swift` exists with real-schema `ModelContainer` configuration. API key wiring and `ThreadOrchestrator` wiring not yet built.
 
 **/Features**
 
 - `WorkstreamListView.swift` — not built.
 - `ConversationView.swift` — not built.
 
-**Consequence:** no message can currently be sent end to end. All three intelligence layers now exist — retrieval, on-device processing, and reasoning — but nothing calls them in sequence. The eval ran ahead of the core loop, since it depends only on the models and `ContextEngine`. The orchestrator and a minimal send/receive UI are the outstanding work.
+**Consequence:** all four layers now exist and `ThreadOrchestrator.send()` can drive a message through the full lifecycle, but nothing in the app calls it yet — `ThreadsApp.swift` does not construct an orchestrator, and there is no view to call `send()` from. A minimal send/receive UI is the outstanding work before a message can be sent end to end from the app itself.
 
 ---
 
