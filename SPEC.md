@@ -199,19 +199,20 @@ Update this section whenever a file lands, before anything else in this document
 
 - `ContextEngine.swift` — `EmbeddingService` (actor; NLContextualEmbedding wrapper with vDSP cosine similarity) and `ContextRetrievalEngine` (explicitly `nonisolated` struct; payload assembly, token budgeting, relevance decay, `decayStrength` bounding). Retrieval is parameterized by strategy and returns nodes with their scores.
 - `LLMProvider.swift` — `LLMStreamingProvider` protocol, `ClaudeSSEProvider` (SSE over `URLSession.AsyncBytes`, no SDK), `OnDeviceFallbackProvider` (Foundation Models), and `LLMProviderFactory`. Covers streaming SSE parsing, API key resolution precedence, request encoding, transparent failover, and refusal handling. Not yet wired into an orchestrator.
+- `OnDeviceIntelligence.swift` — Layer 2. Four `@Generable` result types (`ExtractedContext`, `WorkstreamSummary`, `ProactiveAnalysis`, `ContentTags`), one `LanguageModelSession` per task, held by an actor so the sessions cannot be entered concurrently. Tagging runs on `SystemLanguageModel(useCase: .contentTagging)`; the other three run on `.default`. Extraction returns calibrated confidence with an escalation flag rather than the model's raw self-report. Prompt building and calibration are pure `nonisolated` value types, which is what makes them testable without Apple Intelligence. Not yet wired into an orchestrator.
 
 **/ThreadsTests**
 
 - `RetrievalSet.json` — 36-node synthetic corpus, six supersession chains, 30 hand-authored labeled queries. Frozen and committed as a standalone commit for provenance. Human-authored; never agent-modified.
 - `RetrievalEval.swift` — three-strategy eval runner. Fixed evaluation clock, deterministic node IDs, no caching, macro-averaged precision@5 / recall@5, tier-2 assertions as inequalities rather than golden numbers. Runs on physical device only.
 - `LLMProviderTests.swift` — SSE parser state machine against canned event lines, request-body shape, key resolution, factory routing and failover, and the Claude provider over a stubbed `URLProtocol` transport.
+- `OnDeviceIntelligenceTests.swift` — confidence calibration, prompt construction and budgeting, and the generation-vocabulary-to-storage-vocabulary mapping. Calls no model: the simulator has no Apple Intelligence, so the assertions are on the logic around the model rather than on its prose.
 - `ModelContainerHelper.swift` — per-test in-memory `ModelContainer`.
 
 ### Not yet built
 
 **/Core**
 
-- `OnDeviceIntelligence.swift` — Foundation Models integration, four `@Generable` types (`ExtractedContext`, `WorkstreamSummary`, `ProactiveAnalysis`, `ContentTags`), separate `LanguageModelSession` per task type.
 - `ThreadOrchestrator.swift` — the full message lifecycle through a single `send()` entry point.
 
 **/App**
@@ -223,7 +224,7 @@ Update this section whenever a file lands, before anything else in this document
 - `WorkstreamListView.swift` — not built.
 - `ConversationView.swift` — not built.
 
-**Consequence:** no message can currently be sent end to end. The eval ran ahead of the core loop, since it depends only on the models and `ContextEngine`. The orchestrator and a minimal send/receive UI are the outstanding work.
+**Consequence:** no message can currently be sent end to end. All three intelligence layers now exist — retrieval, on-device processing, and reasoning — but nothing calls them in sequence. The eval ran ahead of the core loop, since it depends only on the models and `ContextEngine`. The orchestrator and a minimal send/receive UI are the outstanding work.
 
 ---
 
