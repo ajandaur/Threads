@@ -18,11 +18,7 @@ The claim: **building a memory system is the easy part. Proving it retrieves the
 
 _A recording of the current build: type a message, watch it round-trip through retrieval, Foundation Models, and Claude, and land back in the thread._
 
-<!-- Drop the recording in here. On GitHub.com, drag the video file directly into
-     this README while editing it in the browser — GitHub uploads it and replaces
-     this comment with a link like:
-     https://github.com/<user>/<repo>/assets/<id>/<hash>
-     A local file works too: ![demo](./docs/demo.gif) -->
+[Demo.mov.zip](https://github.com/user-attachments/files/31604892/Demo.mov.zip)
 
 ---
 
