@@ -109,11 +109,7 @@ The project is built with an AI coding agent under a fixed harness. The constrai
 
 ```
 CLAUDE.md                      (auto-loads; routing + fallback triggers)
-CONTRACT.template.md
-CONTRACT_core_loop.md
-CONTRACT_models.md
-CONTRACT_context_engine.md
-CONTRACT_eval.md
+CONTRACT.template.md           (each unit of work starts as a copy)
 .claude/rules/
   DECISIONS.md                 (no paths: — loads unconditionally)
   verify.md                    (no paths: — loads unconditionally)
