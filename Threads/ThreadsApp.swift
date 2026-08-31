@@ -39,7 +39,7 @@ struct ThreadsApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ThreadView(orchestrator: orchestrator)
+            HomeView(orchestrator: orchestrator)
         }
         .modelContainer(sharedModelContainer)
     }
