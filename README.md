@@ -33,14 +33,15 @@ Portfolio project, built in daily increments against written contracts, each ver
 - ✅ **`LLMProvider`** — Claude over SSE streaming, with on-device (Foundation Models) fallback and provider failover. 44 tests.
 - ✅ **`OnDeviceIntelligence`** — on-device extraction, summarization, and tagging via Foundation Models, actor-isolated with per-task locking. 40 tests.
 - ✅ **`ThreadOrchestrator`** — the full `send()` lifecycle: save → embed → retrieve → stream → persist, then background extraction, escalation, and summary. 22 tests.
-- ✅ **Minimal chat UI** — `ThreadOrchestrator` wired into the app; a scrolling thread view and a send box, enough to exercise the whole loop end to end on device. Unstyled by design — the real UI pass hasn't started (see [`rules/ui.md`](./.claude/rules/ui.md)).
+- ✅ **UI — Home & Workstream Detail** — dark, information-dense SwiftUI drawn entirely from the `Palette` token set (see [`rules/ui.md`](./.claude/rules/ui.md)). Home lists workstream cards over a voice-capture bar; each card opens a three-tab Workstream Detail. **Stream** is the live conversation wired to `ThreadOrchestrator.send()` — plain user turns, blue-bordered AI turns, and a compact row of tappable, color-coded chips for each extracted node. **Context** is the knowledge graph: nodes grouped by type with load-bearing semantic borders, visible relevance meters, proportional decay dimming, and superseded nodes struck through at 30% opacity. **Insights** is stubbed.
 
 **Open**
 - 🚧 `decay-weighted semantic` collapses onto the recency baseline. A real finding, not a test defect — the fix belongs in `ContextEngine`'s scoring, not the eval.
 
 **Not started**
-- ⬜ Voice capture (`SpeechAnalyzer`)
-- ⬜ Real UI pass — dark, voice-first, node-type colors, debug inspector for retrieval scores
+- ⬜ Voice capture (`SpeechAnalyzer`) — the capture bar is visual only; recording is not yet wired
+- ⬜ Debug inspector — long-press an AI response to reveal the assembled system prompt and live retrieval scores
+- ⬜ Insights tab — the proactive-surfacing feed
 
 Day-by-day plan in [`SPEC.md`](./SPEC.md).
 
