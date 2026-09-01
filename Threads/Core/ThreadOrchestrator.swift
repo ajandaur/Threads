@@ -179,6 +179,53 @@ nonisolated enum EscalationPromptBuilder {
     }
 }
 
+// MARK: - Retrieval inspector capture
+//
+// A session-scoped, in-memory record of what retrieval produced for each
+// assistant turn: the exact system prompt sent and the full scored breakdown
+// behind it. The debug inspector reads this on long-press. Deliberately not
+// persisted — the scores are set-relative to the candidate set and instant they
+// were computed over (see `ContextEngine`'s `normalizedSimilarities`), so a
+// snapshot is only meaningful for the run that produced it; recomputing it later
+// against a changed graph would show different numbers than the ones that
+// actually drove the answer.
+
+/// One retrieval's full trace, captured at `send()` time and keyed by the
+/// assistant `Message` it produced.
+nonisolated struct RetrievalInspectorSnapshot: Sendable, Equatable {
+    let capturedAt: Date
+    /// False on a device without Apple Intelligence assets (e.g. the simulator),
+    /// where the query embedding is empty and the semantic term collapses to a
+    /// uniform placeholder — the inspector flags this so the degenerate scores
+    /// are not read as real affinities.
+    let queryWasEmbedded: Bool
+    let config: RetrievalConfig
+    /// The exact assembled system prompt handed to the provider.
+    let assembledSystemPrompt: String
+    /// Every candidate node, in ranked order, with its full scoring trace.
+    let scoredNodes: [RetrievalScoreBreakdown]
+    /// The subset that fit the token budget and was actually sent.
+    let includedNodeIDs: Set<UUID>
+    let estimatedTokenCount: Int
+}
+
+/// Holds the most recent retrieval snapshot per assistant message for the life
+/// of the process. An actor because it is written from the orchestrator's
+/// isolation domain and read from the main actor (the Stream tab's long-press).
+actor RetrievalInspectorStore {
+    private var snapshots: [UUID: RetrievalInspectorSnapshot] = [:]
+
+    init() {}
+
+    func record(_ snapshot: RetrievalInspectorSnapshot, for messageID: UUID) {
+        snapshots[messageID] = snapshot
+    }
+
+    func snapshot(for messageID: UUID) -> RetrievalInspectorSnapshot? {
+        snapshots[messageID]
+    }
+}
+
 // MARK: - ThreadOrchestrator
 
 /// The full message lifecycle through a single `send()` entry point.
@@ -207,18 +254,25 @@ actor ThreadOrchestrator {
     private let retrievalEngine = ContextRetrievalEngine()
     private let configuration: Configuration
 
+    /// Session-scoped capture of the retrieval trace behind each answer, read by
+    /// the debug inspector. A `let` of a `Sendable` actor type, so the UI can
+    /// reach it synchronously off this actor and `await` its own accessors.
+    let inspectorStore: RetrievalInspectorStore
+
     init(
         modelContainer: ModelContainer,
         embeddingService: EmbeddingService,
         intelligence: OnDeviceIntelligence,
         providerFactory: LLMProviderFactory,
-        configuration: Configuration = Configuration()
+        configuration: Configuration = Configuration(),
+        inspectorStore: RetrievalInspectorStore = RetrievalInspectorStore()
     ) {
         self.context = ModelContext(modelContainer)
         self.embeddingService = embeddingService
         self.intelligence = intelligence
         self.providerFactory = providerFactory
         self.configuration = configuration
+        self.inspectorStore = inspectorStore
     }
 
     /// The app's wiring: real embedding, real on-device intelligence, Claude
@@ -277,12 +331,22 @@ actor ThreadOrchestrator {
             let queryEmbedding = (try? await embeddingService.embed(text)) ?? []
             userMessage.isEmbedded = !queryEmbedding.isEmpty
 
-            // Steps 3-5.
-            let payload = retrievalEngine.retrieve(
-                queryEmbedding: queryEmbedding,
-                nodes: workstream.contextNodes,
-                recentMessages: workstream.messages,
+            // Steps 3-5. The scored breakdown is computed once and both drives
+            // retrieval (via `scoredNode`) and is captured for the debug
+            // inspector below, so the two can never show different numbers.
+            // `now` is pinned so the inspector's decay reflects the instant
+            // retrieval actually ran.
+            let now = Date.now
+            let scored = retrievalEngine.scoredBreakdown(
+                for: queryEmbedding,
+                in: workstream.contextNodes,
+                config: configuration.retrieval,
+                now: now
+            )
+            let payload = retrievalEngine.assemblePayload(
                 workstreamSummary: workstream.compactContext,
+                rankedNodes: scored.map(\.scoredNode),
+                recentMessages: workstream.messages,
                 config: configuration.retrieval
             )
             let request = LLMRequest(
@@ -314,6 +378,22 @@ actor ThreadOrchestrator {
             context.insert(assistantMessage)
             workstream.updatedAt = .now
             try context.save()
+
+            // Capture the retrieval trace behind this answer for the debug
+            // inspector, keyed by the assistant message it produced. In-memory
+            // and session-scoped (see `RetrievalInspectorStore`).
+            await inspectorStore.record(
+                RetrievalInspectorSnapshot(
+                    capturedAt: now,
+                    queryWasEmbedded: !queryEmbedding.isEmpty,
+                    config: configuration.retrieval,
+                    assembledSystemPrompt: request.systemPrompt,
+                    scoredNodes: scored,
+                    includedNodeIDs: Set(payload.relevantNodes.map(\.nodeID)),
+                    estimatedTokenCount: payload.estimatedTokenCount
+                ),
+                for: assistantMessage.id
+            )
 
             continuation.finish()
 

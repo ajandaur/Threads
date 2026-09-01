@@ -163,6 +163,51 @@ nonisolated struct ScoredContextNode: Sendable, Equatable {
     let createdAt: Date
 }
 
+/// The full per-node scoring trace for one retrieval, in ranked order. Exists
+/// for the debug inspector: it carries the intermediate terms `ScoredContextNode`
+/// discards — the raw cosine, the set-relative normalized semantic term, and the
+/// pure decay factor — so the inspector can show *why* a node ranked where it did
+/// instead of reconstructing (and possibly diverging from) the numbers that
+/// actually drove retrieval.
+///
+/// Like the score itself, these values are set-relative and only meaningful for
+/// the candidate set and instant they were computed over (see
+/// `normalizedSimilarities`). They are a snapshot of one retrieval, not a node's
+/// standing affinity.
+nonisolated struct RetrievalScoreBreakdown: Sendable, Equatable {
+    let nodeID: UUID
+    let content: String
+    let nodeType: String
+    /// Raw cosine over the mean-pooled embeddings, before normalization. `0`
+    /// when either vector is missing or the query was never embedded.
+    let cosineSimilarity: Double
+    /// The min-max normalized cosine actually used as the semantic term. Set
+    /// relative: the weakest candidate is `0`, the strongest `1`.
+    let normalizedSemantic: Double
+    /// Pure exponential decay from the node's age and the configured half-life,
+    /// in `0...1`, before `decayStrength` compresses it. Computed regardless of
+    /// strategy so the inspector can show it even when the active strategy does
+    /// not apply it.
+    let decayFactor: Double
+    /// The final score used for ranking — the same value as the matching
+    /// `ScoredContextNode.score`.
+    let combinedScore: Double
+    let isSuperseded: Bool
+    let createdAt: Date
+
+    /// The retrieval-facing projection, dropping the inspector-only terms.
+    var scoredNode: ScoredContextNode {
+        ScoredContextNode(
+            nodeID: nodeID,
+            content: content,
+            nodeType: nodeType,
+            score: combinedScore,
+            isSuperseded: isSuperseded,
+            createdAt: createdAt
+        )
+    }
+}
+
 nonisolated struct MessageSnapshot: Sendable, Equatable {
     let messageID: UUID
     let role: String
@@ -194,14 +239,29 @@ nonisolated struct ContextRetrievalEngine {
         config: RetrievalConfig,
         now: Date = .now
     ) -> [ScoredContextNode] {
+        scoredBreakdown(for: queryEmbedding, in: nodes, config: config, now: now)
+            .map(\.scoredNode)
+    }
+
+    /// The same computation as `rankedNodes`, retaining the intermediate scoring
+    /// terms for the debug inspector. `rankedNodes` is defined in terms of this
+    /// so retrieval and the inspector can never disagree about a node's score.
+    func scoredBreakdown(
+        for queryEmbedding: [Double],
+        in nodes: [ContextNode],
+        config: RetrievalConfig,
+        now: Date = .now
+    ) -> [RetrievalScoreBreakdown] {
         // Similarity is normalized across the whole candidate set, so it has to
         // be computed for every node before any node can be scored. That makes
         // this a two-pass operation rather than the one-pass `map` it looks like.
         let similarities = nodes.map { similarity(queryEmbedding: queryEmbedding, node: $0) }
         let semanticScores = normalizedSimilarities(similarities)
 
-        return zip(nodes, semanticScores)
-            .map { node, semantic in
+        return nodes.indices
+            .map { i in
+                let node = nodes[i]
+                let semantic = semanticScores[i]
                 let base = baseScore(
                     strategy: config.strategy,
                     semantic: semantic,
@@ -215,16 +275,23 @@ nonisolated struct ContextRetrievalEngine {
                     isSuperseded: isSuperseded,
                     penalty: config.supersededPenalty
                 )
-                return ScoredContextNode(
+                return RetrievalScoreBreakdown(
                     nodeID: node.id,
                     content: node.content,
                     nodeType: node.nodeType,
-                    score: final,
+                    cosineSimilarity: similarities[i],
+                    normalizedSemantic: semantic,
+                    decayFactor: decayFactor(
+                        createdAt: node.createdAt,
+                        now: now,
+                        halfLifeDays: config.halfLifeDays
+                    ),
+                    combinedScore: final,
                     isSuperseded: isSuperseded,
                     createdAt: node.createdAt
                 )
             }
-            .sorted { $0.score > $1.score }
+            .sorted { $0.combinedScore > $1.combinedScore }
     }
 
     func assemblePayload(

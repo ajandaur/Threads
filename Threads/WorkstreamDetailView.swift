@@ -85,6 +85,7 @@ private struct StreamTab: View {
     @State private var streamingText = ""
     @State private var isSending = false
     @State private var errorText: String?
+    @State private var inspection: Inspection?
 
     init(workstreamID: UUID, orchestrator: ThreadOrchestrator?) {
         self.workstreamID = workstreamID
@@ -129,6 +130,9 @@ private struct StreamTab: View {
                 inputBar
             }
         }
+        .sheet(item: $inspection) { inspection in
+            DebugInspectorView(messageID: inspection.messageID, snapshot: inspection.snapshot)
+        }
     }
 
     private var conversation: some View {
@@ -138,6 +142,9 @@ private struct StreamTab: View {
                     ForEach(messages) { message in
                         MessageBubble(role: message.roleValue, text: message.content)
                             .id(message.id)
+                            .inspectable(message.roleValue == .assistant) {
+                                presentInspector(for: message.id)
+                            }
 
                         if let extracted = nodesBySource[message.id], !extracted.isEmpty {
                             ExtractionChipsRow(nodes: extracted)
@@ -194,6 +201,22 @@ private struct StreamTab: View {
         }
     }
 
+    /// Opens the debug inspector for an assistant turn. The snapshot lives on
+    /// the orchestrator's actor, so this reads it asynchronously and always
+    /// presents — a turn with no captured trace (a prior session, or no live
+    /// orchestrator) gets the inspector's honest "no trace" state rather than
+    /// nothing happening.
+    private func presentInspector(for messageID: UUID) {
+        guard let store = orchestrator?.inspectorStore else {
+            inspection = Inspection(messageID: messageID, snapshot: nil)
+            return
+        }
+        Task {
+            let snapshot = await store.snapshot(for: messageID)
+            inspection = Inspection(messageID: messageID, snapshot: snapshot)
+        }
+    }
+
     private func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !isSending, let orchestrator else { return }
@@ -220,6 +243,274 @@ private struct StreamTab: View {
             }
             streamingText = ""
             isSending = false
+        }
+    }
+}
+
+// MARK: - Debug inspector
+
+/// A pending inspector presentation. Carries the snapshot if one was captured
+/// this session, or `nil` — the inspector renders an honest "no trace" state
+/// rather than being suppressed, so a long-press always does something.
+private struct Inspection: Identifiable {
+    let messageID: UUID
+    let snapshot: RetrievalInspectorSnapshot?
+    var id: UUID { messageID }
+}
+
+private extension View {
+    /// Adds a long-press that opens the debug inspector, but only where it makes
+    /// sense — assistant turns, the only ones a retrieval produced.
+    @ViewBuilder
+    func inspectable(_ isEnabled: Bool, action: @escaping () -> Void) -> some View {
+        if isEnabled {
+            contentShape(Rectangle())
+                .onLongPressGesture(minimumDuration: 0.4, perform: action)
+        } else {
+            self
+        }
+    }
+}
+
+/// The debug inspector: the assembled system prompt sent to the LLM and the live
+/// retrieval scores that produced it, for one assistant turn. Deliberately reads
+/// as a technical instrument — information-dense, monospace on every raw value —
+/// not a polished feature. Every number is taken straight from the captured
+/// `ContextRetrievalEngine` breakdown; nothing here is reconstructed or estimated.
+private struct DebugInspectorView: View {
+    let messageID: UUID
+    let snapshot: RetrievalInspectorSnapshot?
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                Palette.background.ignoresSafeArea()
+
+                if let snapshot {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 22) {
+                            if !snapshot.queryWasEmbedded { degenerateBanner }
+                            parameters(snapshot)
+                            promptSection(snapshot.assembledSystemPrompt)
+                            scoresSection(snapshot)
+                        }
+                        .padding(16)
+                    }
+                } else {
+                    emptyState
+                }
+            }
+            .navigationTitle("Retrieval Inspector")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                        .tint(Palette.accent)
+                }
+            }
+            .toolbarBackground(Palette.background, for: .navigationBar)
+        }
+        .preferredColorScheme(.dark)
+    }
+
+    // MARK: Sections
+
+    /// Shown when the query was never embedded (e.g. the simulator): the
+    /// semantic term is a uniform placeholder, so the scores below are not real
+    /// affinities and must not be read as such.
+    private var degenerateBanner: some View {
+        Text("⚠ Query was not embedded on this device — the semantic term is a uniform placeholder, so the scores below reflect only decay and supersession, not affinity.")
+            .font(.system(.caption, design: .monospaced))
+            .foregroundStyle(Palette.openQuestion)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(10)
+            .background(Palette.openQuestion.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func parameters(_ snapshot: RetrievalInspectorSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionHeader("PARAMETERS")
+
+            VStack(alignment: .leading, spacing: 4) {
+                row("captured", snapshot.capturedAt.formatted(.relative(presentation: .named)))
+                row("strategy", strategyLabel(snapshot.config.strategy))
+                row("query embedded", snapshot.queryWasEmbedded ? "yes" : "no")
+                row("candidates", "\(snapshot.scoredNodes.count)")
+                row("included", "\(snapshot.includedNodeIDs.count) / topK \(snapshot.config.topK)")
+                row("half-life", String(format: "%.1f d", snapshot.config.halfLifeDays))
+                row("decay strength", String(format: "%.2f", snapshot.config.decayStrength))
+                row("superseded penalty", String(format: "%.2f", snapshot.config.supersededPenalty))
+                row("tokens", "\(snapshot.estimatedTokenCount) / \(snapshot.config.tokenBudget)")
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Palette.surface, in: RoundedRectangle(cornerRadius: 10))
+        }
+    }
+
+    private func promptSection(_ prompt: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionHeader("ASSEMBLED SYSTEM PROMPT")
+
+            Text(prompt.isEmpty ? "(empty — no summary or relevant nodes)" : prompt)
+                .font(.system(.footnote, design: .monospaced))
+                .foregroundStyle(prompt.isEmpty ? Palette.textSecondary : Palette.textPrimary)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+                .background(Palette.surface, in: RoundedRectangle(cornerRadius: 10))
+        }
+    }
+
+    private func scoresSection(_ snapshot: RetrievalInspectorSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionHeader("RETRIEVAL SCORES · ranked")
+
+            if snapshot.scoredNodes.isEmpty {
+                Text("(no candidate nodes in this workstream)")
+                    .font(.system(.footnote, design: .monospaced))
+                    .foregroundStyle(Palette.textSecondary)
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Palette.surface, in: RoundedRectangle(cornerRadius: 10))
+            } else {
+                ForEach(Array(snapshot.scoredNodes.enumerated()), id: \.element.nodeID) { index, node in
+                    scoreRow(rank: index + 1, node: node, included: snapshot.includedNodeIDs.contains(node.nodeID))
+                }
+                formulaNote(snapshot.config)
+            }
+        }
+    }
+
+    // MARK: One scored node
+
+    private func scoreRow(rank: Int, node: RetrievalScoreBreakdown, included: Bool) -> some View {
+        let type = ContextNodeType(rawValue: node.nodeType) ?? .fact
+        let color = Palette.color(for: type)
+
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text(String(format: "%2d", rank))
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(Palette.textSecondary)
+                Circle().fill(color).frame(width: 7, height: 7)
+                Text(shortLabel(type).uppercased())
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(color)
+                    .tracking(0.5)
+                Spacer()
+                Text(included ? "IN" : "—")
+                    .font(.system(.caption2, design: .monospaced).weight(.semibold))
+                    .foregroundStyle(included ? Palette.accent : Palette.textSecondary)
+            }
+
+            Text(node.content)
+                .font(.caption)
+                .foregroundStyle(Palette.textPrimary)
+                .lineLimit(3)
+                .strikethrough(node.isSuperseded)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            metricsLine(node)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Palette.surface, in: RoundedRectangle(cornerRadius: 8))
+        .opacity(node.isSuperseded ? 0.4 : 1)
+    }
+
+    private func metricsLine(_ node: RetrievalScoreBreakdown) -> some View {
+        HStack(spacing: 12) {
+            metric("cos", node.cosineSimilarity)
+            metric("nrm", node.normalizedSemantic)
+            metric("dec", node.decayFactor)
+            Spacer()
+            HStack(spacing: 4) {
+                Text("→").foregroundStyle(Palette.textSecondary)
+                Text(String(format: "%.3f", node.combinedScore)).foregroundStyle(Palette.accent)
+            }
+            .font(.system(.caption, design: .monospaced).weight(.semibold))
+        }
+    }
+
+    private func metric(_ label: String, _ value: Double) -> some View {
+        HStack(spacing: 3) {
+            Text(label).foregroundStyle(Palette.textSecondary)
+            Text(String(format: "%.3f", value)).foregroundStyle(Palette.textPrimary)
+        }
+        .font(.system(.caption2, design: .monospaced))
+    }
+
+    /// Spells out how the shown terms combine into `→ score` for the active
+    /// strategy, so `dec` (the pure decay factor) reads correctly rather than
+    /// looking like it should multiply straight through.
+    private func formulaNote(_ config: RetrievalConfig) -> some View {
+        let formula: String
+        switch config.strategy {
+        case .semanticOnly:
+            formula = "score = nrm × (superseded ? penalty : 1)"
+        case .recencyOnly:
+            formula = "score = 1/(1+ageDays) × (superseded ? penalty : 1)   · cos/nrm/dec shown for reference only"
+        case .decayWeightedSemantic:
+            formula = "score = nrm × (1 − ds·(1 − dec)) × (superseded ? penalty : 1),  ds = " + String(format: "%.2f", config.decayStrength)
+        }
+        return Text(formula)
+            .font(.system(.caption2, design: .monospaced))
+            .foregroundStyle(Palette.textSecondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 2)
+    }
+
+    // MARK: Empty state
+
+    private var emptyState: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "scope")
+                .font(.system(size: 40, weight: .semibold))
+                .foregroundStyle(Palette.textSecondary)
+            Text("No retrieval trace for this response.")
+                .font(.subheadline)
+                .foregroundStyle(Palette.textPrimary)
+            Text("Traces are captured in memory as responses are generated this session, and are not kept across launches. A response from an earlier session has none to show.")
+                .font(.caption)
+                .foregroundStyle(Palette.textSecondary)
+                .multilineTextAlignment(.center)
+            Text(messageID.uuidString)
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundStyle(Palette.textSecondary)
+                .padding(.top, 4)
+        }
+        .padding(32)
+    }
+
+    // MARK: Small helpers
+
+    private func sectionHeader(_ text: String) -> some View {
+        Text(text)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(Palette.textSecondary)
+            .tracking(1)
+    }
+
+    private func row(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(label)
+                .foregroundStyle(Palette.textSecondary)
+                .frame(width: 130, alignment: .leading)
+            Text(value)
+                .foregroundStyle(Palette.textPrimary)
+            Spacer(minLength: 0)
+        }
+        .font(.system(.caption, design: .monospaced))
+    }
+
+    private func strategyLabel(_ strategy: RetrievalStrategy) -> String {
+        switch strategy {
+        case .semanticOnly: "semantic-only"
+        case .recencyOnly: "recency-only"
+        case .decayWeightedSemantic: "decay-weighted semantic"
         }
     }
 }
@@ -600,6 +891,38 @@ private func iconName(_ type: ContextNodeType) -> String {
     }
     .preferredColorScheme(.dark)
     .modelContainer(container)
+}
+
+/// Layout-only preview. The scores here are **synthetic fixture values**, not
+/// real `ContextRetrievalEngine` output — a device with the embedding model is
+/// where the true numbers appear. It exists to check the instrument's layout.
+#Preview("Debug Inspector — synthetic") {
+    let decisionID = UUID()
+    let factID = UUID()
+    let supersededID = UUID()
+    return DebugInspectorView(
+        messageID: UUID(),
+        snapshot: RetrievalInspectorSnapshot(
+            capturedAt: .now,
+            queryWasEmbedded: true,
+            config: RetrievalConfig(strategy: .decayWeightedSemantic),
+            assembledSystemPrompt: """
+            Workstream summary:
+            Replace the token refresh path; it double-refreshes under load.
+
+            Relevant context:
+            - [decision] Serialize token refresh behind a single actor.
+            - [fact] The refresh endpoint double-fires when two requests race.
+            """,
+            scoredNodes: [
+                RetrievalScoreBreakdown(nodeID: decisionID, content: "Serialize token refresh behind a single actor so concurrent callers share one in-flight refresh.", nodeType: ContextNodeType.decision.rawValue, cosineSimilarity: 0.931, normalizedSemantic: 1.0, decayFactor: 0.97, combinedScore: 0.993, isSuperseded: false, createdAt: .now),
+                RetrievalScoreBreakdown(nodeID: factID, content: "The refresh endpoint double-fires when two requests race.", nodeType: ContextNodeType.fact.rawValue, cosineSimilarity: 0.902, normalizedSemantic: 0.71, decayFactor: 0.95, combinedScore: 0.699, isSuperseded: false, createdAt: .now),
+                RetrievalScoreBreakdown(nodeID: supersededID, content: "Guard the refresh call with a lock in the networking layer.", nodeType: ContextNodeType.decision.rawValue, cosineSimilarity: 0.874, normalizedSemantic: 0.33, decayFactor: 0.61, combinedScore: 0.152, isSuperseded: true, createdAt: .now),
+            ],
+            includedNodeIDs: [decisionID, factID],
+            estimatedTokenCount: 214
+        )
+    )
 }
 
 /// In-memory sample data: one workstream with a user/assistant exchange and the
