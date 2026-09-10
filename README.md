@@ -18,8 +18,7 @@ The claim: **building a memory system is the easy part. Proving it retrieves the
 
 _A recording of the current build: type a message, watch it round-trip through retrieval, Foundation Models, and Claude, and land back in the thread._
 
-<img width="114" height="248" alt="Adobe Express - Demo2" src="https://github.com/user-attachments/assets/b5bd0022-5de4-4f30-815d-f894bd5f14b8" />
-
+[Demo2.mov.zip](https://github.com/user-attachments/files/32058691/Demo2.mov.zip)
 
 ---
 
