@@ -2,5 +2,9 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Thread uses the microphone so you can capture thoughts by voice.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Thread transcribes your voice on-device to turn spoken thoughts into text.</string>
 </dict>
 </plist>

@@ -34,14 +34,14 @@ Portfolio project, built in daily increments against written contracts, each ver
 - ✅ **`OnDeviceIntelligence`** — on-device extraction, summarization, and tagging via Foundation Models, actor-isolated with per-task locking. 40 tests.
 - ✅ **`ThreadOrchestrator`** — the full `send()` lifecycle: save → embed → retrieve → stream → persist, then background extraction, escalation, and summary. 22 tests.
 - ✅ **UI — Home & Workstream Detail** — dark, information-dense SwiftUI drawn entirely from the `Palette` token set (see [`rules/ui.md`](./.claude/rules/ui.md)). Home lists workstream cards over a voice-capture bar; each card opens a three-tab Workstream Detail. **Stream** is the live conversation wired to `ThreadOrchestrator.send()` — plain user turns, blue-bordered AI turns, and a compact row of tappable, color-coded chips for each extracted node. **Context** is the knowledge graph: nodes grouped by type with load-bearing semantic borders, visible relevance meters, proportional decay dimming, and superseded nodes struck through at 30% opacity. **Insights** is stubbed.
+- ✅ **Voice capture (`SpeechAnalyzer`)** — hold-to-record on the Home capture bar: microphone + speech-recognition permissions, `AVAudioEngine` capture streamed through `SpeechAnalyzer`/`SpeechTranscriber` for on-device live transcription, with a live waveform and transcript and medium/light haptics; release creates a workstream and fires `send()`. Permission, transcript-assembly, and waveform logic are unit-tested (20 tests); the live audio path is device-only (no Speech model on the simulator).
+- ✅ **Debug inspector** — long-press an AI response to reveal the assembled system prompt and the live retrieval scores that produced it.
 
 **Open**
 - 🚧 `decay-weighted semantic` collapses onto the recency baseline. A real finding, not a test defect — the fix belongs in `ContextEngine`'s scoring, not the eval.
 
 **Not started**
-- ⬜ Voice capture (`SpeechAnalyzer`) — the capture bar is visual only; recording is not yet wired
-- ⬜ Debug inspector — long-press an AI response to reveal the assembled system prompt and live retrieval scores
-- ⬜ Insights tab — the proactive-surfacing feed
+- ⬜ Insights tab — the proactive-surfacing feed (stubbed this cycle)
 
 Day-by-day plan in [`SPEC.md`](./SPEC.md).
 
@@ -131,13 +131,11 @@ The point isn't that an agent wrote the code. It's that the code is held to the 
 
 `NLContextualEmbedding` cannot compile its model on the simulator (`NLNaturalLanguageErrorDomain Code=7 "E5 model compilation failed"`), so the four tests needing a real embedding fail there and pass on a physical iPhone 17 Pro. There's no simulator fallback — iOS 26.5 is the only runtime above the project's 26.4 deployment target. **Run the suite on a device.** These tests exercise the real framework rather than a mock, on purpose, and stay that way. `ThreadOrchestrator` degrades gracefully when this happens — a failed embed becomes an empty vector rather than a failed send — so the app still functions on the simulator with degraded retrieval.
 
-`ThreadOrchestrator` creates its `ModelContext` during `init()`, which currently runs on the main thread, but the actor's own methods then touch that context from a background executor — SwiftData logs `ModelContext: Unbinding from the main queue... consider using a ModelActor` at runtime. Observed live, not yet fixed; the correct shape is likely `ThreadOrchestrator` as a `ModelActor` rather than a plain `actor` holding a `ModelContext`.
-
 ---
 
 ## Tech stack
 
-Swift 6 (strict concurrency) · SwiftData · SwiftUI · `NLContextualEmbedding` · Foundation Models · Accelerate/vDSP · `SpeechAnalyzer` (planned) · Claude API (SSE streaming) · Swift Testing
+Swift 6 (strict concurrency) · SwiftData · SwiftUI · `NLContextualEmbedding` · Foundation Models · Accelerate/vDSP · `SpeechAnalyzer` · Claude API (SSE streaming) · Swift Testing
 
 ## Building
 

@@ -4,8 +4,16 @@
 //
 //  The Home screen: a voice capture bar over a list of workstream cards.
 //  Colors come exclusively from `Palette` (see `.claude/rules/ui.md`); no hex
-//  values live here. Recording is visual-only for now — the capture bar and
-//  the empty-state mic do not record. That wiring lands in Days 7-8.
+//  values live here. The capture bar and the empty-state mic hold to record via
+//  `AudioStreamManager`, show a live waveform and transcript, and on release
+//  create a new workstream and drive the first turn through
+//  `ThreadOrchestrator.send()`.
+//
+//  Home has no selected workstream, and intelligent voice routing is out of
+//  scope (SPEC.md), so a release with a non-empty transcript opens a *new*
+//  workstream — matching the empty state's "capture your first thought." The
+//  standing summary step later refines the title we seed here from the
+//  transcript.
 //
 
 import SwiftUI
@@ -22,16 +30,27 @@ struct HomeView: View {
     /// real model stack (`EmbeddingService.init` can throw off-device).
     var orchestrator: ThreadOrchestrator?
 
+    @Environment(\.modelContext) private var modelContext
+
+    /// The voice-capture controller. `@State` so it is created once and observed.
+    @State private var audio = AudioStreamManager()
+    /// Navigation stack; a release from voice capture pushes the new workstream.
+    @State private var path: [UUID] = []
+    /// Trigger counters for the haptics required by `.claude/rules/ui.md`:
+    /// medium on record start, light on stop.
+    @State private var startTick = 0
+    @State private var stopTick = 0
+
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             ZStack {
                 Palette.background.ignoresSafeArea()
 
                 if sortedWorkstreams.isEmpty {
-                    EmptyCaptureState()
+                    EmptyCaptureState(audio: audio, onBegin: beginRecording, onFinish: finishRecording)
                 } else {
                     VStack(spacing: 16) {
-                        VoiceCaptureBar()
+                        VoiceCaptureBar(audio: audio, onBegin: beginRecording, onFinish: finishRecording)
                             .padding(.horizontal, 16)
                             .padding(.top, 8)
 
@@ -56,6 +75,13 @@ struct HomeView: View {
         }
         .tint(Palette.accent)
         .preferredColorScheme(.dark)
+        .sensoryFeedback(.impact(weight: .medium), trigger: startTick)
+        .sensoryFeedback(.impact(weight: .light), trigger: stopTick)
+        .task {
+            // Front-load the on-device speech model so the first hold is fast.
+            // No-op until speech is authorized, so it won't prompt on launch.
+            await audio.prewarm()
+        }
     }
 
     /// Pinned workstreams first, then most-recently-updated within each group.
@@ -65,46 +91,243 @@ struct HomeView: View {
             return lhs.updatedAt > rhs.updatedAt
         }
     }
+
+    // MARK: - Capture wiring
+
+    private func beginRecording() {
+        startTick += 1
+        Task { await audio.startRecording() }
+    }
+
+    private func finishRecording() {
+        stopTick += 1
+        Task {
+            let transcript = await audio.stopRecording()
+            route(transcript)
+        }
+    }
+
+    /// A completed capture becomes a new workstream and its first turn. The
+    /// stream must be consumed (not just started) — `ThreadOrchestrator.send`
+    /// cancels its pipeline when the returned stream is dropped — so iteration
+    /// keeps it alive while the persisted turn surfaces in the pushed detail via
+    /// `@Query`.
+    private func route(_ rawTranscript: String) {
+        let text = rawTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, let orchestrator else { return }
+
+        let workstream = Workstream(title: WorkstreamNaming.title(from: text))
+        modelContext.insert(workstream)
+        try? modelContext.save()
+
+        let workstreamID = workstream.id
+        path.append(workstreamID)
+
+        Task {
+            do {
+                for try await _ in orchestrator.send(text, workstreamID: workstreamID) {}
+            } catch {
+                // The turn is persisted by the orchestrator as it progresses and
+                // surfaces in the detail view; there is no separate UI to notify.
+            }
+        }
+    }
+}
+
+/// Derives a workstream title from a captured transcript. Pure and
+/// module-internal so the trimming/first-sentence rule is unit-testable.
+nonisolated enum WorkstreamNaming {
+    static func title(from transcript: String, maxLength: Int = 48) -> String {
+        let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "New Thought" }
+
+        // First sentence, or the whole thing if it has no terminator.
+        let firstSentence = trimmed.prefix { $0 != "." && $0 != "!" && $0 != "?" && !$0.isNewline }
+        var candidate = String(firstSentence).trimmingCharacters(in: .whitespaces)
+        if candidate.isEmpty { candidate = trimmed }
+
+        if candidate.count > maxLength {
+            candidate = String(candidate.prefix(maxLength)).trimmingCharacters(in: .whitespaces) + "…"
+        }
+        return candidate
+    }
 }
 
 // MARK: - Voice capture bar
 
-/// Full-width capture bar. Visual only — long-press recording, waveform, and
-/// live transcript arrive in Days 7-8.
+/// Full-width capture bar. Hold to record: while recording it shows a live
+/// waveform and the streaming transcript; release routes the transcript. A
+/// denied permission or unavailable transcriber shows its reason in place.
 private struct VoiceCaptureBar: View {
+    let audio: AudioStreamManager
+    let onBegin: () -> Void
+    let onFinish: () -> Void
+
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "mic.fill")
-                .font(.system(size: 24, weight: .semibold))
-                .foregroundStyle(Palette.accent)
-            Text("Hold to capture")
-                .font(.headline)
-                .foregroundStyle(Palette.textSecondary)
+        content
+            .frame(maxWidth: .infinity)
+            .frame(height: 68)
+            .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 20))
+            .contentShape(.rect(cornerRadius: 20))
+            .holdToRecord(onBegin: onBegin, onFinish: onFinish)
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch audio.state {
+        case .recording, .stopping:
+            HStack(spacing: 12) {
+                WaveformView(levels: audio.levels)
+                    .frame(width: 72, height: 40)
+                Text(audio.transcript.isEmpty ? "Listening…" : audio.transcript)
+                    .font(.subheadline)
+                    .foregroundStyle(audio.transcript.isEmpty ? Palette.textSecondary : Palette.textPrimary)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.horizontal, 16)
+
+        case .denied, .unavailable:
+            Text(CaptureMessage.text(for: audio.state))
+                .font(.subheadline)
+                .foregroundStyle(Palette.openQuestion)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 16)
+
+        case .preparing:
+            HStack(spacing: 12) {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(Palette.accent)
+                Text("Preparing…")
+                    .font(.headline)
+                    .foregroundStyle(Palette.textSecondary)
+            }
+
+        case .idle:
+            HStack(spacing: 12) {
+                Image(systemName: "mic.fill")
+                    .font(.system(size: 24, weight: .semibold))
+                    .foregroundStyle(Palette.accent)
+                Text("Hold to capture")
+                    .font(.headline)
+                    .foregroundStyle(Palette.textSecondary)
+            }
         }
-        .frame(maxWidth: .infinity)
-        .frame(height: 68)
-        .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 20))
     }
 }
 
 // MARK: - Empty state
 
 private struct EmptyCaptureState: View {
+    let audio: AudioStreamManager
+    let onBegin: () -> Void
+    let onFinish: () -> Void
+
+    private var isRecording: Bool {
+        audio.state == .recording || audio.state == .stopping
+    }
+
     var body: some View {
         VStack(spacing: 24) {
-            Image(systemName: "mic.fill")
+            Image(systemName: isRecording ? "waveform" : "mic.fill")
                 .font(.system(size: 52, weight: .semibold))
                 .foregroundStyle(Palette.accent)
                 .frame(width: 128, height: 128)
                 .glassEffect(.regular.interactive(), in: .circle)
+                .contentShape(.circle)
+                .holdToRecord(onBegin: onBegin, onFinish: onFinish)
 
-            Text("Hold to capture your first thought.")
+            Text(prompt)
                 .font(.headline)
-                .foregroundStyle(Palette.textSecondary)
+                .foregroundStyle(promptColor)
                 .multilineTextAlignment(.center)
+
+            if isRecording && !audio.transcript.isEmpty {
+                Text(audio.transcript)
+                    .font(.subheadline)
+                    .foregroundStyle(Palette.textPrimary)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(3)
+            }
         }
         .padding(32)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var prompt: String {
+        switch audio.state {
+        case .recording, .stopping:
+            return audio.transcript.isEmpty ? "Listening…" : ""
+        case .preparing:
+            return "Preparing…"
+        case .denied, .unavailable:
+            return CaptureMessage.text(for: audio.state)
+        case .idle:
+            return "Hold to capture your first thought."
+        }
+    }
+
+    private var promptColor: Color {
+        switch audio.state {
+        case .denied, .unavailable: Palette.openQuestion
+        default: Palette.textSecondary
+        }
+    }
+}
+
+// MARK: - Waveform
+
+/// A row of bars scaled by the recent audio levels published by
+/// `AudioStreamManager`. Newest samples appear on the trailing edge.
+private struct WaveformView: View {
+    let levels: [Double]
+
+    var body: some View {
+        GeometryReader { geo in
+            HStack(alignment: .center, spacing: 2) {
+                ForEach(Array(levels.enumerated()), id: \.offset) { _, level in
+                    Capsule()
+                        .fill(Palette.accent)
+                        .frame(width: 2, height: max(3, geo.size.height * level))
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+        }
+    }
+}
+
+// MARK: - Capture presentation helpers
+
+/// Human-readable copy for the non-recording, non-idle capture states.
+private enum CaptureMessage {
+    static func text(for state: AudioStreamManager.State) -> String {
+        switch state {
+        case .denied(.microphone):
+            "Microphone access is off. Enable it in Settings to capture by voice."
+        case .denied(.speech):
+            "Speech recognition is off. Enable it in Settings to capture by voice."
+        case .unavailable(let reason):
+            reason
+        default:
+            ""
+        }
+    }
+}
+
+private extension View {
+    /// Press-and-hold gesture: fires `onBegin` on press down and `onFinish` on
+    /// release. `minimumDuration`/`maximumDistance` of `.infinity` make it a
+    /// true hold that never auto-fires or cancels when the finger drifts.
+    func holdToRecord(onBegin: @escaping () -> Void, onFinish: @escaping () -> Void) -> some View {
+        onLongPressGesture(
+            minimumDuration: .infinity,
+            maximumDistance: .infinity,
+            pressing: { isPressing in
+                if isPressing { onBegin() } else { onFinish() }
+            },
+            perform: {}
+        )
     }
 }
 

@@ -7,18 +7,22 @@
 //  one place that owns a `ModelContext` and calls all three in sequence
 //  through a single `send()` entry point.
 //
-//  ## Why an actor with its own `ModelContext`
+//  ## Why a `ModelActor` with its own `ModelContext`
 //
 //  `EmbeddingService`, `OnDeviceIntelligence`, and `LLMProviderFactory` are
 //  all actors — this follows the same "actor isolation for services"
-//  decision, and being a plain actor (rather than `@MainActor`) means the
+//  decision, and being a background actor (rather than `@MainActor`) means the
 //  work genuinely runs off the main thread, which is what "background,
 //  non-blocking" in the contract asks for rather than merely interleaving
 //  with UI work on the same queue.
 //
-//  A `ModelContext` is confined to a single execution context, so this actor
-//  creates its own from the shared `ModelContainer` rather than reusing the
-//  UI's `@Environment(\.modelContext)` one. The two never touch each other,
+//  A `ModelContext` is confined to a single execution context, so this is a
+//  `ModelActor` whose context is bound to its own serial `ModelExecutor` (see
+//  the type declaration below) and created from the shared `ModelContainer`
+//  rather than reusing the UI's `@Environment(\.modelContext)` one. A plain
+//  actor runs on the default thread-hopping executor, and a context created on
+//  the main thread but used there is unsupported. The two contexts never touch
+//  each other,
 //  and no `@Model` object fetched here crosses back out through an `await` —
 //  only `Sendable` value types (`LLMStreamChunk`, `UUID`, `CalibratedExtraction`)
 //  cross that boundary. A caller that wants the persisted `Message` or
@@ -229,7 +233,17 @@ actor RetrievalInspectorStore {
 // MARK: - ThreadOrchestrator
 
 /// The full message lifecycle through a single `send()` entry point.
-actor ThreadOrchestrator {
+///
+/// A `ModelActor` rather than a plain actor: it owns a `ModelContext` confined
+/// to its own serial `ModelExecutor`, so every `send()`/follow-up step touches
+/// that context on one consistent executor. A plain actor runs on the default
+/// (thread-hopping) cooperative executor, and a `ModelContext` created on the
+/// main thread but used there is unsupported — SwiftData logs "instantiated on
+/// the main queue but is being used off it" and rebinds. Conformance is written
+/// out by hand rather than via the `@ModelActor` macro so the dependency-
+/// injecting `init` and `makeDefault` below survive (the macro would synthesize
+/// its own `init(modelContainer:)`).
+actor ThreadOrchestrator: ModelActor {
 
     /// Tunables that are policy, not architecture, gathered here rather than
     /// scattered as call-site literals.
@@ -247,7 +261,15 @@ actor ThreadOrchestrator {
         }
     }
 
-    private let context: ModelContext
+    // `ModelActor` requirements. The executor wraps the context so the actor
+    // runs its isolated work on the same serial queue the context is bound to.
+    nonisolated let modelExecutor: any ModelExecutor
+    nonisolated let modelContainer: ModelContainer
+
+    /// The actor's confined `ModelContext` (provided by `ModelActor` as
+    /// `modelContext`). Aliased so the lifecycle methods below read unchanged.
+    private var context: ModelContext { modelContext }
+
     private let embeddingService: EmbeddingService
     private let intelligence: OnDeviceIntelligence
     private let providerFactory: LLMProviderFactory
@@ -267,7 +289,9 @@ actor ThreadOrchestrator {
         configuration: Configuration = Configuration(),
         inspectorStore: RetrievalInspectorStore = RetrievalInspectorStore()
     ) {
-        self.context = ModelContext(modelContainer)
+        let context = ModelContext(modelContainer)
+        self.modelExecutor = DefaultSerialModelExecutor(modelContext: context)
+        self.modelContainer = modelContainer
         self.embeddingService = embeddingService
         self.intelligence = intelligence
         self.providerFactory = providerFactory
