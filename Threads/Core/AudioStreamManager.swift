@@ -207,6 +207,16 @@ final class AudioStreamManager {
             return
         }
 
+        // A tap (rather than a hold) has already released by now. Bail before
+        // the expensive availability / model-install / engine work so a tap
+        // snaps back to idle instead of stalling on "Preparing…". Nothing has
+        // been built yet, so there is nothing to tear down.
+        if pendingStop {
+            pendingStop = false
+            state = .idle
+            return
+        }
+
         // 2. Bail out cleanly where on-device transcription can't run at all
         //    (notably the simulator, which has no Speech model) rather than
         //    calling into the transcription stack and tripping an assertion.
@@ -237,6 +247,14 @@ final class AudioStreamManager {
             return
         }
 
+        // Released while the model was installing: same early bail as above,
+        // still before any hardware is touched.
+        if pendingStop {
+            pendingStop = false
+            state = .idle
+            return
+        }
+
         // 4. The analyzer does no audio conversion, so capture must arrive in a
         //    format its modules accept.
         guard let analyzerFormat = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
@@ -253,13 +271,13 @@ final class AudioStreamManager {
         // 6. Audio session + engine tap. The tap runs on the render thread and
         //    only touches the Sendable processor, never `self`.
         do {
-            try configureSession()
+            try await configureSession()
             try startEngine(convertingTo: analyzerFormat, input: inputBuilder, levels: levelBuilder)
         } catch {
             inputBuilder.finish()
             levelBuilder.finish()
             teardownEngine()
-            deactivateSession()
+            await deactivateSession()
             state = .unavailable("Couldn't start audio capture: \(error.localizedDescription)")
             return
         }
@@ -290,7 +308,7 @@ final class AudioStreamManager {
             inputBuilder.finish()
             levelBuilder.finish()
             teardownEngine()
-            deactivateSession()
+            await deactivateSession()
             state = .unavailable("Couldn't start transcription: \(error.localizedDescription)")
             return
         }
@@ -356,7 +374,7 @@ final class AudioStreamManager {
         }
         await resultsTask?.value
         levelTask?.cancel()
-        deactivateSession()
+        await deactivateSession()
 
         analyzer = nil
         inputBuilder = nil
@@ -395,7 +413,14 @@ final class AudioStreamManager {
 
     // MARK: Audio graph
 
-    private func configureSession() throws {
+    // `nonisolated @concurrent` is load-bearing: `AVAudioSession`'s
+    // `setCategory`/`setActive` block until CoreAudio has (de)activated the
+    // session, and running them on the main actor stalls the UI — the
+    // `SessionCore`/`AVAudioSession_iOS` "UI unresponsiveness … called on the
+    // main thread" warnings. They touch only the shared session singleton, no
+    // `self` state, so hopping to the concurrent executor is safe.
+    @concurrent
+    private nonisolated func configureSession() async throws {
         let session = AVAudioSession.sharedInstance()
         // `.duckOthers` is only valid on a playback-capable category, so pure
         // `.record` takes no options here.
@@ -403,7 +428,8 @@ final class AudioStreamManager {
         try session.setActive(true, options: .notifyOthersOnDeactivation)
     }
 
-    private func deactivateSession() {
+    @concurrent
+    private nonisolated func deactivateSession() async {
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
