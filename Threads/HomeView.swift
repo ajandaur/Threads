@@ -316,17 +316,38 @@ private enum CaptureMessage {
 }
 
 private extension View {
-    /// Press-and-hold gesture: fires `onBegin` on press down and `onFinish` on
-    /// release. `minimumDuration`/`maximumDistance` of `.infinity` make it a
-    /// true hold that never auto-fires or cancels when the finger drifts.
+    /// Press-and-hold gesture: fires `onBegin` on touch-down and `onFinish` on
+    /// release.
     func holdToRecord(onBegin: @escaping () -> Void, onFinish: @escaping () -> Void) -> some View {
-        onLongPressGesture(
-            minimumDuration: .infinity,
-            maximumDistance: .infinity,
-            pressing: { isPressing in
-                if isPressing { onBegin() } else { onFinish() }
-            },
-            perform: {}
+        modifier(HoldToRecord(onBegin: onBegin, onFinish: onFinish))
+    }
+}
+
+/// A `DragGesture(minimumDistance: 0)`-based hold rather than
+/// `onLongPressGesture(minimumDuration: .infinity, …)`: an infinite-duration
+/// long press can never satisfy the recognizer, so it intermittently *cancels*
+/// in this hierarchy (interactive glass inside the nav stack) and fires its
+/// `pressing(false)` callback while the finger is still down — which aborted the
+/// recording. A drag gesture tracks the live touch across view rebuilds:
+/// `onChanged` fires once on press, `onEnded` only on real lift.
+private struct HoldToRecord: ViewModifier {
+    let onBegin: () -> Void
+    let onFinish: () -> Void
+    @State private var isPressing = false
+
+    func body(content: Content) -> some View {
+        content.gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in
+                    guard !isPressing else { return }
+                    isPressing = true
+                    onBegin()
+                }
+                .onEnded { _ in
+                    guard isPressing else { return }
+                    isPressing = false
+                    onFinish()
+                }
         )
     }
 }
