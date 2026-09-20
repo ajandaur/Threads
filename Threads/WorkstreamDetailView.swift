@@ -24,6 +24,20 @@ private enum DetailTab: Hashable {
     case stream, context, insights
 }
 
+// MARK: - Motion
+
+/// The two "something just happened" moments get subtle, heavily damped springs.
+/// High `dampingFraction` means they settle without visible bounce — this is a
+/// professional instrument (see `.claude/rules/ui.md`), so motion communicates a
+/// change occurred without drawing attention to itself.
+private enum Motion {
+    /// Streaming assistant text: eases each chunk's height growth so the bubble
+    /// expands smoothly instead of snapping taller token by token.
+    static let stream = Animation.spring(response: 0.32, dampingFraction: 0.9)
+    /// Newly extracted context nodes materializing as extraction completes.
+    static let nodes = Animation.spring(response: 0.4, dampingFraction: 0.88)
+}
+
 struct WorkstreamDetailView: View {
     let workstreamID: UUID
 
@@ -546,6 +560,13 @@ private struct MessageBubble: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .fixedSize(horizontal: false, vertical: true)
+            // While streaming, grow the bubble on a gentle, well-damped spring so
+            // each arriving chunk eases the height open instead of snapping it —
+            // the glyphs themselves still appear immediately, which reads as live
+            // typing rather than static text popping in. The ProgressView→text
+            // handoff on the first chunk crossfades under the same scope. A
+            // persisted turn passes `nil`, so it renders with no animation.
+            .animation(isStreaming ? Motion.stream : nil, value: text)
 
         case .user, .system:
             Text(text)
@@ -698,9 +719,15 @@ private struct ContextTab: View {
                     LazyVStack(alignment: .leading, spacing: 24) {
                         ForEach(groups, id: \.type) { group in
                             ContextGroup(type: group.type, nodes: group.nodes)
+                                .transition(.opacity.combined(with: .scale(scale: 0.97, anchor: .top)))
                         }
                     }
                     .padding(16)
+                    // As extraction completes, a new node (or its first-of-type
+                    // group) fades and settles in on a spring instead of snapping
+                    // into place. Keyed to node count so only insertions/removals
+                    // animate — scrolling and decay re-renders stay still.
+                    .animation(Motion.nodes, value: nodes.count)
                 }
             }
         }
@@ -730,6 +757,7 @@ private struct ContextGroup: View {
 
             ForEach(nodes) { node in
                 ContextNodeRow(node: node)
+                    .transition(.opacity.combined(with: .scale(scale: 0.97, anchor: .top)))
             }
         }
     }
