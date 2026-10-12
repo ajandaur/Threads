@@ -10,7 +10,7 @@ Hold a button, speak a thought, release. Thread transcribes it, classifies it, r
 | Extraction | Foundation Models (on-device, iOS 26) | Classification, structured extraction, summarization |
 | Reasoning | Claude API | The one call that leaves the device |
 
-The claim: **building a memory system is the easy part. Proving it retrieves the right thing is the part almost nobody does.** Thread ships a hand-labeled retrieval eval — and that eval currently says the strategy this project was built around **loses to plain semantic search**. See [The eval](#the-eval).
+The claim: **building a memory system is the easy part. Proving it retrieves the right thing is the part almost nobody does.** Thread ships a hand-labeled retrieval eval. Its first run showed that the strategy this project was built around **lost to plain semantic search**. Its final run shows the fix winning by two queries out of thirty, with one metric moving the wrong way. See [The eval](#the-eval).
 
 ---
 
@@ -24,9 +24,9 @@ _A recording of the current build: type a message, watch it round-trip through r
 
 ## Status
 
-Portfolio project, built in daily increments against written contracts, each verified in a fresh review session.
+**Complete.** A portfolio project, built in daily increments against written contracts. A fresh review session verified each increment.
 
-**Built and tested**
+**What's built**
 - ✅ **SwiftData schema** — `Workstream`, `Message`, `ContextNode`, `ProactiveSurfacing`, with cascade-delete relationships and enums stored as raw `String` for `#Predicate` compatibility. 7 tests.
 - ✅ **`ContextEngine`** — `EmbeddingService` (actor over `NLContextualEmbedding`, 512-dim, mean-pooled, L2-normalized) and `ContextRetrievalEngine` (three strategies behind one config parameter, not three code paths). 7 tests.
 - ✅ **Retrieval eval** — 36 hand-labeled nodes, 30 hand-labeled queries, three strategies, comparison table regenerated on every run. 7 tests.
@@ -37,13 +37,12 @@ Portfolio project, built in daily increments against written contracts, each ver
 - ✅ **Voice capture (`SpeechAnalyzer`)** — hold-to-record on the Home capture bar: microphone + speech-recognition permissions, `AVAudioEngine` capture streamed through `SpeechAnalyzer`/`SpeechTranscriber` for on-device live transcription, with a live waveform and transcript and medium/light haptics; release creates a workstream and fires `send()`. Permission, transcript-assembly, and waveform logic are unit-tested (20 tests); the live audio path is device-only (no Speech model on the simulator).
 - ✅ **Debug inspector** — long-press an AI response to reveal the assembled system prompt and the live retrieval scores that produced it.
 
-**Open**
-- 🚧 `decay-weighted semantic` collapses onto the recency baseline. A real finding, not a test defect — the fix belongs in `ContextEngine`'s scoring, not the eval.
+**Deliberately out of scope**
+- Insights tab (the proactive-surfacing feed). The tab exists as a stub.
+- Intelligent voice routing, Live Activities, App Intents, Share Sheet, Spotlight, and Markdown export.
+- Contradiction detection as a user-facing feature. In this project it exists only as `supersededByID`.
 
-**Not started**
-- ⬜ Insights tab — the proactive-surfacing feed (stubbed this cycle)
-
-Day-by-day plan in [`SPEC.md`](./SPEC.md).
+The full spec and scope boundaries are in [`SPEC.md`](./SPEC.md).
 
 ---
 
@@ -83,6 +82,7 @@ Made deliberately and locked before implementation, not discovered along the way
 | Foundation Models for extraction | Zero cost, offline, fast enough for background work |
 | Actor isolation for services | Thread-safe by construction, no manual locking |
 | Relevance decay, 14-day half-life | Prevents stale context from dominating retrieval |
+| `decayStrength` = 0.25 | Bounds how much decay can move a ranking, separately from the half-life's curve shape |
 | Retrieval strategy parameterized, not hardcoded | Enables a clean eval comparison on identical data |
 | Superseded-node links (`supersededByID`) | Makes "topically near but wrong" a first-class retrieval case |
 | Raw `String` storage for enums | `#Predicate` and `#Index` only work with primitive stored types |
@@ -95,19 +95,28 @@ Full list in [`.claude/rules/DECISIONS.md`](./.claude/rules/DECISIONS.md).
 
 36 hand-authored nodes (facts, decisions, open questions, action items, including six supersession pairs where a later node replaces an earlier one) and 30 labeled queries, each carrying a `relevant_node_ids` set and an `irrelevant_but_tempting` set — topically adjacent nodes that are wrong.
 
+**First run: the core strategy failed.** Decay-weighted semantic returned the same top-5 as the recency-only baseline on 30 of 30 queries. It lost to plain semantic search by 3.6× on precision@5.
+
+**Diagnosis.** Within a single query, cosine similarity across the 36 candidates spans only about 1.24×. The 14-day decay factor spans 18.8× across the corpus. When a near-constant term is multiplied by a widely varying one, the varying term decides the ranking on its own.
+
+**Fix.** This changed `ContextEngine`'s scoring, not the eval. Similarities are min-max normalized across the candidate set. Decay's influence is bounded by `decayStrength` using `1 − s·(1 − decay)`. The locked 14-day half-life is untouched. `s = 0.25` was chosen from a sweep over 0–1 as the midpoint of the region where the tests pass. A second sweep confirmed it, run in a session that hadn't seen the first sweep's numbers. The corpus and the assertions stayed frozen throughout.
+
+**Final table** (physical device, 30 queries, top-K 5, `decayStrength` 0.25):
+
 | Strategy | Precision@5 | Recall@5 | Tempting node in top-5 |
 |---|---|---|---|
-| semantic-only | **0.1200** | **0.6000** | 0.3667 |
+| semantic-only | 0.1200 | 0.6000 | 0.3667 |
 | recency-only | 0.0333 | 0.1667 | 0.2000 |
-| decay-weighted semantic | 0.0333 | 0.1667 | 0.2000 |
+| decay-weighted semantic | **0.1333** | **0.6667** | 0.4333 |
 
-**Decay-weighted semantic ties the recency baseline exactly and loses to plain semantic search by 3.6×.** Not a coincidence of averages — the two return an identical top-5 on 30 of 30 queries.
+**Caveats:**
+- Every query has exactly one relevant node, so precision@5 is recall@5 ÷ 5, and its ceiling is 0.2. The two columns are not independent evidence. 0.1333 means 20 of 30 queries hit.
+- Decay-weighted beats semantic-only by two queries. That is not a large margin.
+- Decay-weighted's tempting-node rate got *worse* after the fix (0.2000 → 0.4333). It is the only aggregate that carries independent signal, and it moved the wrong way. The cause is unexplained.
+- The five "historical" queries score 0.0000 for every strategy, so that assertion passes vacuously (`0 ≥ 0`).
+- The sweep passes from 0.00 to 0.45, but at `s = 0` decay does nothing. The meaningful range is about 0.10 to 0.45.
 
-Likely cause: semantic similarity on this corpus sits in a band about 0.005 wide, while the decay factor ranges over an order of magnitude. Multiplying a near-constant term by a wildly variable one lets the variable term decide the ranking outright.
-
-Nothing was tuned in response. The corpus and the assertions are frozen, and the test stays red until `ContextEngine`'s scoring is fixed.
-
-Two limits worth naming: the five "historical" queries score 0.0000 for every strategy, so that assertion currently passes as `0 ≥ 0`; and the eval can't yet distinguish "decay helps" from "decay stopped participating."
+The full breakdown by query subset is in [`SPEC.md`](./SPEC.md#3-results).
 
 Integrity rules, enforced in [`.claude/rules/evals.md`](./.claude/rules/evals.md): every label is hand-authored, and the runner was written in a session that had never seen the retrieval implementation, so it can't be tuned to match. Numbers regenerate from scratch each run — two runs verified bit-identical.
 
@@ -146,4 +155,14 @@ open Threads.xcodeproj
 # Scheme: Threads · Test target: ThreadsTests
 ```
 
-Run the full suite on a device — see [Known limitations](#known-limitations).
+Run the full suite on a device. See [Known limitations](#known-limitations).
+
+### API key
+
+No key is committed. `APIKeyStore` resolves `ANTHROPIC_API_KEY` from these sources, in order:
+
+1. **Environment variable.** Set it under Edit Scheme ▸ Run/Test ▸ Environment Variables. Use this path for the simulator and for tests.
+2. **Info.plist.** Set the entry to `$(ANTHROPIC_API_KEY)` and define the value in a gitignored `.xcconfig`. Use this path for device builds.
+3. **A bundled `Secrets.plist`.** This file is gitignored.
+
+If no key resolves, every request goes to the on-device Foundation Models provider instead of Claude.
